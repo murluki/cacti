@@ -3,7 +3,6 @@ import { v4 as uuidv4 } from "uuid";
 import { DiscoveryOptions } from "fabric-network";
 import {
   Logger,
-  Checks,
   LogLevelDesc,
   LoggerProvider,
 } from "@hyperledger/cactus-common";
@@ -11,7 +10,6 @@ import { PluginRegistry } from "@hyperledger/cactus-core";
 import { PluginLedgerConnectorBesu } from "@hyperledger/cactus-plugin-ledger-connector-besu";
 import { PluginKeychainMemory } from "@hyperledger/cactus-plugin-keychain-memory";
 import {
-  PluginLedgerConnectorQuorum,
   Web3SigningCredentialType,
 } from "@hyperledger/cactus-plugin-ledger-connector-quorum";
 import { IPluginKeychain } from "@hyperledger/cactus-core-api";
@@ -23,7 +21,6 @@ import {
   FABRIC_25_LTS_AIO_FABRIC_VERSION,
   FABRIC_25_LTS_AIO_IMAGE_VERSION,
   FabricTestLedgerV1,
-  QuorumTestLedger,
 } from "@hyperledger/cactus-test-tooling";
 import {
   IEthContractDeployment,
@@ -45,35 +42,14 @@ export interface ISupplyChainAppDummyInfrastructureOptions {
   keychain?: IPluginKeychain;
 }
 
-/**
- * Contains code that is meant to simulate parts of a production grade deployment
- * that would otherwise not be part of the application itself.
- *
- * The reason for this being in existence is so that we can have tutorials that
- * are self-contained instead of starting with a multi-hour setup process where
- * the user is expected to set up ledgers from scratch with all the bells and
- * whistles.
- * The sole purpose of this is to have people ramp up with Cactus as fast as
- * possible.
- */
 export class SupplyChainAppDummyInfrastructure {
   public static readonly CLASS_NAME = "SupplyChainAppDummyInfrastructure";
 
   public readonly besu: BesuTestLedger;
-  public readonly quorum: QuorumTestLedger;
   public readonly fabric: FabricTestLedgerV1;
   public readonly keychain: IPluginKeychain;
   private readonly log: Logger;
-  private _quorumAccount?: Account;
   private _besuAccount?: Account;
-
-  public get quorumAccount(): Account {
-    if (!this._quorumAccount) {
-      throw new Error(`Must call deployContracts() first.`);
-    } else {
-      return this._quorumAccount;
-    }
-  }
 
   public get besuAccount(): Account {
     if (!this._besuAccount) {
@@ -101,16 +77,12 @@ export class SupplyChainAppDummyInfrastructure {
       logLevel: level,
       emitContainerLogs: true,
     });
-    this.quorum = new QuorumTestLedger({
-      logLevel: level,
-      emitContainerLogs: true,
-    });
     this.fabric = new FabricTestLedgerV1({
       publishAllPorts: true,
       imageName: DEFAULT_FABRIC_2_AIO_IMAGE_NAME,
       imageVersion: FABRIC_25_LTS_AIO_IMAGE_VERSION,
       logLevel: level,
-      envVars: new Map([["FABRIC_VERSION", FABRIC_25_LTS_AIO_FABRIC_VERSION]]),
+      envVars: new Map([["FABRIC_VERSION", FABRIC_25_LTS_AIO_FABRIC_VERSION]),
       emitContainerLogs: true,
     });
 
@@ -133,8 +105,7 @@ export class SupplyChainAppDummyInfrastructure {
       this.log.info(`Stopping...`);
       await Promise.all([
         this.besu.stop().then(() => this.besu.destroy()),
-        this.quorum.stop().then(() => this.quorum.destroy()),
-        this.fabric.stop().then(() => this.fabric.destroy()),
+        this.fabric.stop().then(() => this.fabric.destroy(),
       ]);
       this.log.info(`Stopped OK`);
     } catch (ex) {
@@ -148,7 +119,6 @@ export class SupplyChainAppDummyInfrastructure {
       this.log.info(`Starting dummy infrastructure...`);
       await this.fabric.start({ omitPull: false });
       await this.besu.start();
-      await this.quorum.start();
       this.log.info(`Started dummy infrastructure OK`);
     } catch (ex) {
       this.log.error(`Starting of dummy infrastructure crashed: `, ex);
@@ -169,7 +139,7 @@ export class SupplyChainAppDummyInfrastructure {
         JSON.stringify(BambooHarvestRepositoryJSON),
       );
 
-      const bambooHarvestRepository = await this.deployQuorumContract();
+      const bambooHarvestRepository = await this.deployBesuContract();
       const bookshelfRepository = await this.deployBesuContract();
       const shipmentRepository = await this.deployFabricContract();
 
@@ -189,25 +159,30 @@ export class SupplyChainAppDummyInfrastructure {
     }
   }
 
-  public async deployQuorumContract(): Promise<IEthContractDeployment> {
-    this._quorumAccount = await this.quorum.createEthTestAccount(2000000);
-    const rpcApiHttpHost = await this.quorum.getRpcApiHttpHost();
+  public async deployBesuContract(): Promise<IEthContractDeployment> {
+    this._besuAccount = await this.besu.createEthTestAccount(2000000);
+    const rpcApiHttpHost = await this.besu.getRpcApiHttpHost();
+    const rpcApiWsHost = await this.besu.getRpcApiWsHost();
 
     const pluginRegistry = new PluginRegistry();
     pluginRegistry.add(this.keychain);
-    const connector = new PluginLedgerConnectorQuorum({
-      instanceId: "PluginLedgerConnectorQuorum_Contract_Deployment",
+    const connector = new PluginLedgerConnectorBesu({
+      instanceId: "PluginLedgerConnectorBesu_Contract_Deployment",
       rpcApiHttpHost,
+      rpcApiWsHost,
       logLevel: this.options.logLevel,
       pluginRegistry,
     });
 
     const res = await connector.deployContract({
       contractName: BambooHarvestRepositoryJSON.contractName,
+      bytecode: BambooHarvestRepositoryJSON.bytecode,
+      contractAbi: BambooHarvestRepositoryJSON.abi,
+      constructorArgs: [],
       gas: 1000000,
       web3SigningCredential: {
-        ethAccount: this.quorumAccount.address,
-        secret: this.quorumAccount.privateKey,
+        ethAccount: this.besuAccount.address,
+        secret: this.besuAccount.privateKey,
         type: Web3SigningCredentialType.PrivateKeyHex,
       },
       keychainId: this.keychain.getKeychainId(),
@@ -225,49 +200,6 @@ export class SupplyChainAppDummyInfrastructure {
     };
 
     return bambooHarvestRepository;
-  }
-
-  public async deployBesuContract(): Promise<IEthContractDeployment> {
-    this._besuAccount = await this.besu.createEthTestAccount(2000000);
-    const rpcApiHttpHost = await this.besu.getRpcApiHttpHost();
-    const rpcApiWsHost = await this.besu.getRpcApiWsHost();
-
-    const pluginRegistry = new PluginRegistry();
-    pluginRegistry.add(this.keychain);
-    const connector = new PluginLedgerConnectorBesu({
-      instanceId: "PluginLedgerConnectorBesu_Contract_Deployment",
-      rpcApiHttpHost,
-      rpcApiWsHost,
-      logLevel: this.options.logLevel,
-      pluginRegistry,
-    });
-
-    const res = await connector.deployContract({
-      contractName: BookshelfRepositoryJSON.contractName,
-      bytecode: BookshelfRepositoryJSON.bytecode,
-      contractAbi: BookshelfRepositoryJSON.abi,
-      constructorArgs: [],
-      gas: 1000000,
-      web3SigningCredential: {
-        ethAccount: this.besuAccount.address,
-        secret: this.besuAccount.privateKey,
-        type: Web3SigningCredentialType.PrivateKeyHex,
-      },
-      keychainId: this.keychain.getKeychainId(),
-    });
-    const {
-      transactionReceipt: { contractAddress },
-    } = res;
-
-    const bookshelfRepository: IEthContractDeployment = {
-      abi: BookshelfRepositoryJSON.abi,
-      address: contractAddress as string,
-      bytecode: BookshelfRepositoryJSON.bytecode,
-      contractName: BookshelfRepositoryJSON.contractName,
-      keychainId: this.keychain.getKeychainId(),
-    };
-
-    return bookshelfRepository;
   }
 
   public async deployFabricContract(): Promise<IFabricContractDeployment> {
